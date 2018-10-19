@@ -11,12 +11,12 @@ addons:
     packages:
       - google-chrome-stable
 env:
-  - COMMAND="npm test"
-  - COMMAND="npm run e2e-test" _FORCE_LOGS=1
+  - COMMAND="test"
+  - COMMAND="e2e-test" _FORCE_LOGS=1
 before_install:
   - export DISPLAY=:99.0
   - sh -e /etc/init.d/xvfb start
   - sleep 3
 after_success:
   - npm run coverage
-script: $COMMAND
+script: npm run $COMMAND
