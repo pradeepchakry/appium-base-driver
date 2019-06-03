@@ -1,18 +1,23 @@
 import _ from 'lodash';
-import { server, routeConfiguringFunction, DeviceSettings } from '../..';
+import { server, routeConfiguringFunction, DeviceSettings, errors } from '../..';
+import { W3C_ELEMENT_KEY, MJSONWP_ELEMENT_KEY } from '../../lib/protocol/protocol';
 import request from 'request-promise';
 import chai from 'chai';
 import chaiAsPromised from 'chai-as-promised';
 import B from 'bluebird';
 
 const should = chai.should();
+const DEFAULT_ARGS = {
+  host: 'localhost',
+  port: 8181
+};
 chai.use(chaiAsPromised);
 
 function baseDriverE2ETests (DriverClass, defaultCaps = {}) {
   describe('BaseDriver (e2e)', function () {
-    let baseServer, d = new DriverClass();
+    let baseServer, d = new DriverClass(DEFAULT_ARGS);
     before(async function () {
-      baseServer = await server(routeConfiguringFunction(d), 8181);
+      baseServer = await server(routeConfiguringFunction(d), DEFAULT_ARGS.port);
     });
     after(async function () {
       await baseServer.close();
@@ -242,6 +247,102 @@ function baseDriverE2ETests (DriverClass, defaultCaps = {}) {
         res.events.newSessionRequested[0].should.be.a('number');
         res.events.newSessionStarted[0].should.be.a('number');
         await endSession(session.sessionId);
+      });
+    });
+
+    describe('execute driver script', function () {
+      // mock some methods on BaseDriver that aren't normally there except in
+      // a fully blown driver
+      d.findElement = (function (strategy, selector) {
+        if (strategy === 'accessibility id' && selector === 'amazing') {
+          return {[W3C_ELEMENT_KEY]: 'element-id-1'};
+        }
+
+        throw new errors.NoSuchElementError('not found');
+      }).bind(d);
+
+      it('should execute a webdriverio script in the context of session', async function () {
+        let {sessionId} = await startSession(defaultCaps);
+        const script = `
+          const timeouts = await driver.getTimeouts();
+          const status = await driver.status();
+          return [timeouts, status];
+        `;
+        const res = await request({
+          url: `http://localhost:8181/wd/hub/session/${sessionId}/appium/execute_driver`,
+          method: 'POST',
+          json: {script, type: 'webdriverio'},
+        });
+        const expectedTimeouts = {'command': 60000, 'implicit': 0};
+        const expectedStatus = {};
+        res.value.should.eql([expectedTimeouts, expectedStatus]);
+        await endSession(sessionId);
+      });
+
+      it('should fail with any script type other than webdriverio currently', async function () {
+        let {sessionId} = await startSession(defaultCaps);
+        const script = `return 'foo'`;
+        await request({
+          url: `http://localhost:8181/wd/hub/session/${sessionId}/appium/execute_driver`,
+          method: 'POST',
+          json: {script, type: 'wd'},
+        }).should.eventually.be.rejectedWith(/script type/);
+        await endSession(sessionId);
+      });
+
+      it('should execute a webdriverio script that returns elements correctly', async function () {
+        let {sessionId} = await startSession(defaultCaps);
+        const script = `
+          return await driver.$("~amazing");
+        `;
+        const res = await request({
+          url: `http://localhost:8181/wd/hub/session/${sessionId}/appium/execute_driver`,
+          method: 'POST',
+          json: {script},
+        });
+        res.value.should.eql({
+          [W3C_ELEMENT_KEY]: 'element-id-1',
+          [MJSONWP_ELEMENT_KEY]: 'element-id-1'
+        });
+        await endSession(sessionId);
+      });
+
+      it('should execute a webdriverio script that returns elements in deep structure', async function () {
+        let {sessionId} = await startSession(defaultCaps);
+        const script = `
+          const el = await driver.$("~amazing");
+          return {element: el, elements: [el, el]};
+        `;
+        const res = await request({
+          url: `http://localhost:8181/wd/hub/session/${sessionId}/appium/execute_driver`,
+          method: 'POST',
+          json: {script},
+        });
+        const elObj = {
+          [W3C_ELEMENT_KEY]: 'element-id-1',
+          [MJSONWP_ELEMENT_KEY]: 'element-id-1'
+        };
+        res.value.should.eql({element: elObj, elements: [elObj, elObj]});
+        await endSession(sessionId);
+      });
+
+      it('should correctly handle errors that happen in a webdriverio script', async function () {
+        let {sessionId} = await startSession(defaultCaps);
+        const script = `
+          return await driver.$("~notfound");
+        `;
+        const res = await request({
+          url: `http://localhost:8181/wd/hub/session/${sessionId}/appium/execute_driver`,
+          method: 'POST',
+          json: {script},
+          simple: false,
+        });
+        res.should.eql({
+          sessionId,
+          status: 13,
+          value: {message: 'An unknown server-side error occurred while processing the command. Original error: not found'}
+        });
+        await endSession(sessionId);
       });
     });
 
