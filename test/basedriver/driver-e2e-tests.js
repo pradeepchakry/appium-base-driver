@@ -82,20 +82,31 @@ function baseDriverE2ETests (DriverClass, defaultCaps = {}) {
     });
 
     describe('command timeouts', function () {
+      let originalFindElement, originalFindElements;
       function startTimeoutSession (timeout) {
         let caps = _.clone(defaultCaps);
         caps.newCommandTimeout = timeout;
         return startSession(caps);
       }
 
-      d.findElement = function () {
-        return 'foo';
-      }.bind(d);
+      before(function () {
+        originalFindElement = d.findElement;
+        d.findElement = function () {
+          return 'foo';
+        }.bind(d);
 
-      d.findElements = async function () {
-        await B.delay(200);
-        return ['foo'];
-      }.bind(d);
+        originalFindElements = d.findElements;
+        d.findElements = async function () {
+          await B.delay(200);
+          return ['foo'];
+        }.bind(d);
+      });
+
+      after(function () {
+        d.findElement = originalFindElement;
+        d.findElements = originalFindElements;
+      });
+
 
       it('should set a default commandTimeout', async function () {
         let newSession = await startTimeoutSession();
@@ -227,6 +238,7 @@ function baseDriverE2ETests (DriverClass, defaultCaps = {}) {
         res.status.should.equal(13);
         res.value.message.should.contain('Crashytimes');
         await d.onUnexpectedShutdown.should.be.rejectedWith('Crashytimes');
+        d.getStatus = d._oldGetStatus;
       });
     });
 
@@ -253,13 +265,21 @@ function baseDriverE2ETests (DriverClass, defaultCaps = {}) {
     describe('execute driver script', function () {
       // mock some methods on BaseDriver that aren't normally there except in
       // a fully blown driver
-      d.findElement = (function (strategy, selector) {
-        if (strategy === 'accessibility id' && selector === 'amazing') {
-          return {[W3C_ELEMENT_KEY]: 'element-id-1'};
-        }
+      let originalFindElement;
+      before(function () {
+        originalFindElement = d.findElement;
+        d.findElement = (function (strategy, selector) {
+          if (strategy === 'accessibility id' && selector === 'amazing') {
+            return {[W3C_ELEMENT_KEY]: 'element-id-1'};
+          }
 
-        throw new errors.NoSuchElementError('not found');
-      }).bind(d);
+          throw new errors.NoSuchElementError('not found');
+        }).bind(d);
+      });
+
+      after(function () {
+        d.findElement = originalFindElement;
+      });
 
       it('should execute a webdriverio script in the context of session', async function () {
         let {sessionId} = await startSession(defaultCaps);
@@ -273,7 +293,7 @@ function baseDriverE2ETests (DriverClass, defaultCaps = {}) {
           method: 'POST',
           json: {script, type: 'webdriverio'},
         });
-        const expectedTimeouts = {'command': 60000, 'implicit': 0};
+        const expectedTimeouts = {command: 250, implicit: 0};
         const expectedStatus = {};
         res.value.should.eql([expectedTimeouts, expectedStatus]);
         await endSession(sessionId);
@@ -341,6 +361,25 @@ function baseDriverE2ETests (DriverClass, defaultCaps = {}) {
           sessionId,
           status: 13,
           value: {message: 'An unknown server-side error occurred while processing the command. Original error: not found'}
+        });
+        await endSession(sessionId);
+      });
+
+      it('should correctly handle errors that happen when a script cannot be compiled', async function () {
+        let {sessionId} = await startSession(defaultCaps);
+        const script = `
+          return {;
+        `;
+        const res = await request({
+          url: `http://localhost:8181/wd/hub/session/${sessionId}/appium/execute_driver`,
+          method: 'POST',
+          json: {script},
+          simple: false,
+        });
+        res.should.eql({
+          sessionId,
+          status: 13,
+          value: {message: 'An unknown server-side error occurred while processing the command. Original error: SyntaxError: Unexpected token ;'}
         });
         await endSession(sessionId);
       });
